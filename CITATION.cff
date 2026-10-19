@@ -20,26 +20,50 @@ abstract: >-
   Telecommunication Circuits Laboratory, EPFL. 
 license: GPL-3.0+
 preferred-citation:
-  type: conference-paper
+  type: article
+  status: in-press
   authors:
-  - family-names: "Joachim"
-    given-names: "Tapparel"
-    orcid: "https://orcid.org/0000-0002-0154-9738"
-  - family-names: "Afisiadis"
-    given-names: "Orion"
-    orcid: "https://orcid.org/0000-0002-5287-9681"
-  - family-names: "Mayoraz"
-    given-names: "Paul"
-  - family-names: "Balatsoukas-Stimming"
-    given-names: "Alexios"
-    orcid: "https://orcid.org/0000-0002-6721-4666"
-  - family-names: "Burg"
-    given-names: "Andreas"
-    orcid: "https://orcid.org/0000-0002-7270-5558"
-  doi: "10.1109/SPAWC48557.2020.9154273"
-  journal: "2020 IEEE 21st International Workshop on Signal Processing Advances in Wireless Communications (SPAWC)"
-  month: 5
-  start: 1
-  end: 5
-  title: "An Open-Source LoRa Physical Layer Prototype on GNU Radio"
-  year: 2020
+    - family-names: "Scarvaglieri"
+      given-names: "Antonio"
+    - family-names: "Busacca"
+      given-names: "Fabio"
+  title: "LoRa Packet Recovery Under Cross-Technology Interference: A Decoder-Agnostic Approach Based on Noise-to-Noise Learning"
+  journal: "IEEE Internet of Things Journal"
+  year: 2026
+  notes: "Accepted for publication. Volume, pages and DOI to be added."
+references:
+  - type: article
+    authors:
+      - family-names: "Gao"
+        given-names: "Demin"
+      - family-names: "Liu"
+        given-names: "Ye"
+      - family-names: "Ye"
+        given-names: "Qiaolin"
+      - family-names: "Yang"
+        given-names: "Qing"
+      - family-names: "Wang"
+        given-names: "Honggang"
+    title: "Cracking the Code: LoRa Physical-Layer Insights and Signal Recovery Under Cross-Technology Interference"
+    journal: "IEEE Transactions on Wireless Communications"
+    volume: 24
+    issue: 11
+    start: 9660
+    end: 9671
+    year: 2025
+    doi: "10.1109/TWC.2025.3574576"
+    notes: "Method implemented in the optional LoRaSR path of fft_demod."
+  - type: conference-paper
+    authors:
+      - family-names: "Tapparel"
+        given-names: "Joachim"
+      - family-names: "Burg"
+        given-names: "Andreas"
+    title: "Design and Implementation of LoRa Physical Layer in GNU Radio"
+    collection-title: "Proceedings of the GNU Radio Conference"
+    conference:
+      name: "GNU Radio Conference"
+      location: "Knoxville, TN, USA"
+    year: 2024
+    url: "https://pubs.gnuradio.org/index.php/grcon/article/view/145"
+    notes: "Receiver on which this fork is built."

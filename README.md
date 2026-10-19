@@ -47,18 +47,87 @@ In the GNU Radio implementation of the LoRa Tx and Rx chains the user can choose
 	- Utilisation of soft-decision decoding for improved performances
 
 \* Spreading factors 5 and 6 are not compatible with SX126x.
+## LoRaSR (this fork)
+
+This fork is upstream `862746d` plus the LoRaSR implementation and the `frame_sync` fixes described below.
+It is **not** the upstream project; for the maintained receiver use
+[tapparelj/gr-lora_sdr](https://github.com/tapparelj/gr-lora_sdr) [3]. The LoRaSR implementation here is
+the one evaluated and compared with other mitigation methods in [1].
+
+**1. Optional LoRaSR in `fft_demod`.** An implementation of the symbol recovery of Gao et al. [2] for
+symbols partly corrupted by an interference burst. [2] describes the method analytically and gives neither
+numerical parameters nor code; the energy threshold, the partial-FFT estimate and the replica below are our
+design choices, and this is not the original authors' code. It is **off by default**
+(`enable_lorasr = false`); with the flag off the demodulation path is upstream's. When on, for each symbol
+it:
+
+- compares the energy of the two halves of the de-chirped symbol and acts only if one exceeds the other by
+  a factor of 2 (about 3 dB);
+- estimates the symbol from a partial FFT over the clean half, and the complex gain from that half;
+- replaces the corrupted half with the ideal tone.
+
+```python
+from gnuradio import lora_sdr
+demod = lora_sdr.fft_demod(soft_decoding, True, enable_lorasr=True)
+```
+
+**2. Defensive fixes in `frame_sync`.** They remove undefined behavior (uninitialized CFO state, reads
+past the input buffer) and change no estimator. On the SF7 and SF12 captures we compared against upstream,
+they changed no decoding count. They matter only where upstream would read outside its buffers or use
+uninitialized state.
+
+Build as described under *Installation*. In the captures we compared, this fork and upstream `862746d`
+decode to the same counts. The recipe we use compiles the library against conda-forge GNU Radio 3.10.1.1
+with `-DCMAKE_CXX_FLAGS="-fabi-version=13"`.
+
 ## Reference
-### Original publication
-J. Tapparel, O. Afisiadis, P. Mayoraz, A. Balatsoukas-Stimming and A. Burg, "An Open-Source LoRa Physical Layer Prototype on GNU Radio," 2020 IEEE 21st International Workshop on Signal Processing Advances in Wireless Communications (SPAWC), Atlanta, GA, USA, 2020, pp. 1-5.
-[IEEE Xplore link](https://ieeexplore.ieee.org/document/9154273), [arXiv link](https://arxiv.org/abs/2002.08208)
 
-### Updated publication
+If you use this fork, please cite [1], which evaluates the LoRaSR implementation in this repository and
+compares it with other mitigation methods. The method it implements is from [2], and the receiver it builds
+on is [3].
 
-J, Tapparel and A. Burg, "Design and Implementation of LoRa Physical Layer in GNU Radio". Proceedings of the GNU Radio Conference, Knoxville, TN, USA, 2024.
-[GNU Radio Proceedings](https://pubs.gnuradio.org/index.php/grcon/article/view/145)
+```bibtex
+@article{scarvaglieri2026lora,
+  author  = {Scarvaglieri, Antonio and Busacca, Fabio},
+  title   = {{LoRa} Packet Recovery Under Cross-Technology Interference:
+             A Decoder-Agnostic Approach Based on Noise-to-Noise Learning},
+  journal = {IEEE Internet of Things Journal},
+  year    = {2026},
+  note    = {Accepted for publication. Volume, pages and DOI to be added.}
+}
 
+@article{gao2025crackingcode,
+  author  = {Gao, Demin and Liu, Ye and Ye, Qiaolin and Yang, Qing and Wang, Honggang},
+  title   = {Cracking the Code: {LoRa} Physical-Layer Insights and Signal Recovery
+             Under Cross-Technology Interference},
+  journal = {IEEE Trans. Wireless Commun.},
+  volume  = {24},
+  number  = {11},
+  pages   = {9660--9671},
+  year    = {2025},
+  doi     = {10.1109/TWC.2025.3574576}
+}
 
-If you find this implementation useful for your project, please consider citing the aforementioned paper.
+@inproceedings{tapparel2024design,
+  author    = {Tapparel, Joachim and Burg, Andreas},
+  title     = {Design and Implementation of {LoRa} Physical Layer in {GNU Radio}},
+  booktitle = {Proc. GNU Radio Conf.},
+  address   = {Knoxville, TN, USA},
+  year      = {2024},
+  url       = {https://pubs.gnuradio.org/index.php/grcon/article/view/145}
+}
+```
+
+[1] A. Scarvaglieri and F. Busacca, "LoRa Packet Recovery Under Cross-Technology Interference: A
+Decoder-Agnostic Approach Based on Noise-to-Noise Learning," *IEEE Internet of Things Journal*, 2026,
+accepted for publication.
+
+[2] D. Gao, Y. Liu, Q. Ye, Q. Yang and H. Wang, "Cracking the Code: LoRa Physical-Layer Insights and
+Signal Recovery Under Cross-Technology Interference," *IEEE Trans. Wireless Commun.*, vol. 24, no. 11,
+pp. 9660-9671, 2025, doi:10.1109/TWC.2025.3574576.
+
+[3] J. Tapparel and A. Burg, "Design and Implementation of LoRa Physical Layer in GNU Radio,"
+*Proc. GNU Radio Conf.*, Knoxville, TN, USA, 2024. [GNU Radio Proceedings](https://pubs.gnuradio.org/index.php/grcon/article/view/145)
 
 ## Prerequisites
 - Gnuradio 3.10
@@ -183,20 +252,6 @@ Thanks to Ryan Volz this OOT module can also directly be installed as a Conda pa
 		```
 		[grc]
 		local_blocks_path=path_to_the_downloaded_folder/gr-lora_sdr/grc
-## Changelog
-- Add option to ignore sync words checks and print the received values
-- Add optional print of received payload as hex values
-- Added tagged stream input support (for frame definition of frame length)
-- Fixed LLR stream format between _fft\_demod_ and _deinterleaver_ 
-- added tags to crc verification output stream indication frame start, length and CRC result.
-- added separator option for file input
-- added preamble length option
-- added parameter for frame zero-padding
-- add low data-rate optimization support
-- add support of spreading factors smaller than 7
-
- 	<font size="10"> [...](./Changelog.md)</font>
-
 ## Credit
 This work was inspired from [https://github.com/rpp0/gr-lora](https://github.com/rpp0/gr-lora) by Pieter Robyns, Peter Quax, Wim Lamotte and William Thenaers. Which architecture and functionalities have been improved to better emulate the physical layer of LoRa. 
 
