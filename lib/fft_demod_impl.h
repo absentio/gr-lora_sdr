@@ -85,17 +85,40 @@ namespace gr {
       void header_cr_handler(pmt::pmt_t cr);
 
       /**
-       *  \brief  Compute the FFT and fill the class attributes
+       *  \brief  Compute the FFT magnitude squared of the dechirped symbol.
+       *  \param  samples       Pointer to the raw symbol samples.
+       *  \param  skip_dechirp  If true, skip the de-chirp step and use the existing
+       *                        m_dechirped contents (used by the LoRaSR path which
+       *                        de-chirps and reconstructs before calling this).
        */
-      float* compute_fft_mag(const gr_complex *samples);
+      float* compute_fft_mag(const gr_complex *samples, bool skip_dechirp = false);
 
       /**
        *  \brief  Compute the Log-Likelihood Ratios of the SF nbr of bits
        */
       std::vector<LLR> get_LLRs(const gr_complex *samples);
 
+      // -----------------------------------------------------------------------
+      // Optional recovery of symbols partly corrupted by an interference burst
+      // (LoRaSR, Gao et al.). The energy trigger and the partial-FFT recovery
+      // below are this implementation's own design, since the original gives no
+      // numerical parameters.
+      // -----------------------------------------------------------------------
+      bool m_enable_lorasr;             ///< Enable LoRaSR processing
+      uint16_t m_lorasr_s_approx;       ///< Symbol estimate set by lorasr_preprocess()
+      static constexpr float LORASR_THRESH = 2.0f; ///< Energy-ratio threshold (~3 dB)
+
+      /**
+       *  \brief  Detect half-symbol interference in m_dechirped; if found, estimate
+       *          the symbol from the clean half (partial FFT) and replace the dirty
+       *          half with the ideal pure tone in the de-chirped domain.
+       *          Sets m_lorasr_s_approx as a side effect.
+       *  \return true if reconstruction was applied.
+       */
+      bool lorasr_preprocess();
+
      public:
-      fft_demod_impl( bool soft_decoding, bool max_log_approx);
+      fft_demod_impl(bool soft_decoding, bool max_log_approx, bool enable_lorasr = false);
       ~fft_demod_impl();
 
       // Where all the action really happens

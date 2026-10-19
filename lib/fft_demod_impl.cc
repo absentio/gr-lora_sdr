@@ -16,19 +16,20 @@ namespace gr {
     namespace lora_sdr {
 
         fft_demod::sptr
-        fft_demod::make( bool soft_decoding, bool max_log_approx) {
-            return gnuradio::get_initial_sptr(new fft_demod_impl(soft_decoding, max_log_approx));
+        fft_demod::make(bool soft_decoding, bool max_log_approx, bool enable_lorasr) {
+            return gnuradio::get_initial_sptr(new fft_demod_impl(soft_decoding, max_log_approx, enable_lorasr));
         }
 
         /*
          * The private constructor
          */
-        fft_demod_impl::fft_demod_impl(bool soft_decoding, bool max_log_approx)
+        fft_demod_impl::fft_demod_impl(bool soft_decoding, bool max_log_approx, bool enable_lorasr)
             : gr::block("fft_demod",
                         gr::io_signature::make(1, 1, sizeof(gr_complex)),
                         gr::io_signature::make(1, 1, soft_decoding ? MAX_SF * sizeof(LLR) : sizeof(uint16_t))),
-                        m_soft_decoding(soft_decoding), max_log_approx(max_log_approx), 
-                        m_new_frame(true) {
+                        m_soft_decoding(soft_decoding), max_log_approx(max_log_approx),
+                        m_new_frame(true), m_enable_lorasr(enable_lorasr),
+                        m_lorasr_s_approx(0) {
             set_sf(MIN_SF);//accept any new sf
             m_symb_cnt = 0;
             // m_samples_per_symbol = (uint32_t)(1u << m_sf);
@@ -77,14 +78,15 @@ namespace gr {
     }
 
 
-        float *fft_demod_impl::compute_fft_mag(const gr_complex *samples) {
+        float *fft_demod_impl::compute_fft_mag(const gr_complex *samples, bool skip_dechirp) {
             float rec_en = 0;
             kiss_fft_cfg cfg = kiss_fft_alloc(m_samples_per_symbol, 0, 0, 0);
             kiss_fft_cpx *cx_in = new kiss_fft_cpx[m_samples_per_symbol];
             kiss_fft_cpx *cx_out = new kiss_fft_cpx[m_samples_per_symbol];
 
-            // Multiply with ideal downchirp
-            volk_32fc_x2_multiply_32fc(&m_dechirped[0], samples, &m_downchirp[0], m_samples_per_symbol);
+            // Multiply with ideal downchirp (skip if caller pre-populated m_dechirped)
+            if (!skip_dechirp)
+                volk_32fc_x2_multiply_32fc(&m_dechirped[0], samples, &m_downchirp[0], m_samples_per_symbol);
             for (uint32_t i = 0; i < m_samples_per_symbol; i++) {
                 cx_in[i].r = m_dechirped[i].real();
                 cx_in[i].i = m_dechirped[i].imag();
@@ -106,9 +108,89 @@ namespace gr {
             return m_fft_mag_sq;  // /!\ delete[] , release memory after !
         }
 
+        // -----------------------------------------------------------------------
+        // LoRaSR helpers
+        // -----------------------------------------------------------------------
+
+        /**
+         * Detect half-symbol interference in the already-de-chirped m_dechirped buffer.
+         * If one half has >LORASR_THRESH times more energy than the other:
+         *   1. Run a partial FFT on the clean half (zero-pad the dirty half) to get s_approx.
+         *   2. Estimate the complex channel coefficient alpha from the clean half.
+         *   3. Replace the dirty half with the ideal pure tone: alpha * exp(j*2*pi*s/N*n).
+         * Sets m_lorasr_s_approx; returns true if reconstruction was applied.
+         */
+        bool fft_demod_impl::lorasr_preprocess() {
+            const uint32_t N    = m_samples_per_symbol;
+            const uint32_t half = N / 2;
+
+            // Energy of each half in the de-chirped domain
+            float e_t1 = 0.0f, e_t2 = 0.0f;
+            for (uint32_t n = 0;    n < half; n++) e_t1 += std::norm(m_dechirped[n]);
+            for (uint32_t n = half; n < N;    n++) e_t2 += std::norm(m_dechirped[n]);
+
+            const float ratio = (e_t1 > 0.0f) ? (e_t2 / e_t1) : 1.0f;
+            if (ratio < LORASR_THRESH && ratio > (1.0f / LORASR_THRESH))
+                return false;  // symmetric — no detectable half-symbol interference
+
+            // Identify which half is clean and which is dirty
+            const uint32_t clean_start = (ratio > LORASR_THRESH) ? 0    : half;
+            const uint32_t clean_end   = (ratio > LORASR_THRESH) ? half : N;
+            const uint32_t dirty_start = (ratio > LORASR_THRESH) ? half : 0;
+            const uint32_t dirty_end   = (ratio > LORASR_THRESH) ? N    : half;
+
+            // --- Step 1: partial FFT of clean half, zero-padded to N ---
+            kiss_fft_cfg cfg = kiss_fft_alloc(N, 0, 0, 0);
+            kiss_fft_cpx *cx_in  = new kiss_fft_cpx[N]();  // value-initialised to 0
+            kiss_fft_cpx *cx_out = new kiss_fft_cpx[N];
+
+            for (uint32_t n = clean_start; n < clean_end; n++) {
+                cx_in[n].r = m_dechirped[n].real();
+                cx_in[n].i = m_dechirped[n].imag();
+            }
+            kiss_fft(cfg, cx_in, cx_out);
+
+            m_lorasr_s_approx = 0;
+            float best = 0.0f;
+            for (uint32_t i = 0; i < N; i++) {
+                float mag = cx_out[i].r * cx_out[i].r + cx_out[i].i * cx_out[i].i;
+                if (mag > best) { best = mag; m_lorasr_s_approx = (uint16_t)i; }
+            }
+
+            free(cfg);
+            delete[] cx_in;
+            delete[] cx_out;
+
+            // --- Step 2: estimate complex channel alpha from clean de-chirped samples ---
+            // De-chirped signal approximated as: m_dechirped[n] ≈ alpha * exp(j*2π*s/N*n)
+            // => alpha = mean(m_dechirped[n] * exp(-j*2π*s/N*n))  over clean portion
+            const double s = m_lorasr_s_approx;
+            gr_complex alpha_sum(0.0f, 0.0f);
+            for (uint32_t n = clean_start; n < clean_end; n++)
+                alpha_sum += m_dechirped[n] * gr_expj(-2.0 * M_PI * s / N * n);
+            const gr_complex alpha = alpha_sum / (float)(clean_end - clean_start);
+
+            // --- Step 3: replace dirty half with ideal pure tone ---
+            for (uint32_t n = dirty_start; n < dirty_end; n++)
+                m_dechirped[n] = alpha * gr_expj(2.0 * M_PI * s / N * n);
+
+            return true;
+        }
+
+        // -----------------------------------------------------------------------
         // Use in Hard-decoding
         uint16_t fft_demod_impl::get_symbol_val(const gr_complex *samples) {
-            float *m_fft_mag_sq = compute_fft_mag(samples);
+            float *m_fft_mag_sq;
+
+            if (m_enable_lorasr) {
+                // De-chirp into m_dechirped, then apply waveform reconstruction
+                volk_32fc_x2_multiply_32fc(&m_dechirped[0], samples, &m_downchirp[0], m_samples_per_symbol);
+                lorasr_preprocess();
+                // FFT on the (possibly reconstructed) m_dechirped — skip the de-chirp inside
+                m_fft_mag_sq = compute_fft_mag(samples, /*skip_dechirp=*/true);
+            } else {
+                m_fft_mag_sq = compute_fft_mag(samples);
+            }
 
             // Return argmax
             uint16_t idx = std::max_element(m_fft_mag_sq, m_fft_mag_sq + m_samples_per_symbol) - m_fft_mag_sq;
@@ -130,7 +212,14 @@ namespace gr {
 
         // Use in Soft-decoding
         std::vector<LLR> fft_demod_impl::get_LLRs(const gr_complex *samples) {
-            float *m_fft_mag_sq = compute_fft_mag(samples); // from dynamic memory alloc
+            // LoRaSR: de-chirp + reconstruct dirty half before LLR computation.
+            // When m_enable_lorasr=true we pre-populate m_dechirped here and pass
+            // skip_dechirp=true to compute_fft_mag to avoid overwriting it.
+            if (m_enable_lorasr) {
+                volk_32fc_x2_multiply_32fc(&m_dechirped[0], samples, &m_downchirp[0], m_samples_per_symbol);
+                lorasr_preprocess();  // modifies m_dechirped in-place
+            }
+            float *m_fft_mag_sq = compute_fft_mag(samples, m_enable_lorasr); // from dynamic memory alloc; skip_dechirp when lorasr
 
             // Compute LLRs of the SF bits
             std::vector<double> LLs(m_samples_per_symbol);   // 2**sf  Log-Likelihood
