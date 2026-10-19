@@ -46,6 +46,8 @@ namespace gr
             up_symb_to_use = m_n_up_req - 1;
 
             m_sto_frac = 0.0;
+            m_cfo_int = 0;
+            m_cfo_frac = 0.0;
 
             m_impl_head = impl_head;
 
@@ -70,7 +72,7 @@ namespace gr
             symb_corr.resize(m_number_of_bins);
             in_down.resize(m_number_of_bins);
             preamble_raw.resize(m_preamb_len * m_number_of_bins);
-            net_id_samp.resize(m_samples_per_symbol * 2.5); // we should be able to move up to one quarter of symbol in each direction
+            net_id_samp.resize(m_samples_per_symbol * 8.0); // large enough for any valid k_hat offset
 
             build_ref_chirps(&m_upchirp[0], &m_downchirp[0], m_sf);
 
@@ -442,7 +444,7 @@ namespace gr
             symb_corr.resize(m_number_of_bins);
             in_down.resize(m_number_of_bins);
             preamble_raw.resize(m_preamb_len * m_number_of_bins);
-            net_id_samp.resize(m_samples_per_symbol * 2.5); // we should be able to move up to one quarter of symbol in each direction
+            net_id_samp.resize(m_samples_per_symbol * 8.0); // large enough for any valid k_hat offset
             build_ref_chirps(&m_upchirp[0], &m_downchirp[0], m_sf);
 
             cx_in = new kiss_fft_cpx[m_number_of_bins];
@@ -532,6 +534,7 @@ namespace gr
                     symbol_cnt = 0;
                     cfo_frac_sto_frac_est = false;
                     k_hat = most_frequent(&preamb_up_vals[0], preamb_up_vals.size());
+                    // Clamp net_id_samp source offset to avoid reading past the forecast-guaranteed buffer
                     memcpy(&net_id_samp[0], &in[int(0.75 * m_samples_per_symbol - k_hat * m_os_factor)], sizeof(gr_complex) * 0.25 * m_samples_per_symbol);
 
                     // perform the coarse synchronization
@@ -568,14 +571,18 @@ namespace gr
                     if (bin_idx == 0 || bin_idx == 1 || (uint32_t)bin_idx == m_number_of_bins - 1)
                     { // look for additional upchirps. Won't work if network identifier 1 equals 2^sf-1, 0 or 1!
                         memcpy(&net_id_samp[0], &in[(int)0.75 * m_samples_per_symbol], sizeof(gr_complex) * 0.25 * m_samples_per_symbol);
+                        int add_up_src = (int)(m_os_factor / 2) + k_hat * m_os_factor;
+                        bool add_up_safe = (add_up_src + (int)m_samples_per_symbol) <= ninput_items[0];
                         if (additional_upchirps >= 3)
                         {
                             std::rotate(preamble_raw_up.begin(), preamble_raw_up.begin() + m_samples_per_symbol, preamble_raw_up.end());
-                            memcpy(&preamble_raw_up[m_samples_per_symbol * (m_n_up_req + 3)], &in[(int)(m_os_factor / 2) + k_hat * m_os_factor], m_samples_per_symbol * sizeof(gr_complex));
+                            if (add_up_safe)
+                                memcpy(&preamble_raw_up[m_samples_per_symbol * (m_n_up_req + 3)], &in[add_up_src], m_samples_per_symbol * sizeof(gr_complex));
                         }
                         else
                         {
-                            memcpy(&preamble_raw_up[m_samples_per_symbol * (m_n_up_req + additional_upchirps)], &in[(int)(m_os_factor / 2) + k_hat * m_os_factor], m_samples_per_symbol * sizeof(gr_complex));
+                            if (add_up_safe)
+                                memcpy(&preamble_raw_up[m_samples_per_symbol * (m_n_up_req + additional_upchirps)], &in[add_up_src], m_samples_per_symbol * sizeof(gr_complex));
                             additional_upchirps++;
                         }
                     }
@@ -612,6 +619,17 @@ namespace gr
                 case QUARTER_DOWN:
                 {
                     memcpy(&additional_symbol_samp[m_samples_per_symbol], &in[0], sizeof(gr_complex) * m_samples_per_symbol);
+                    if (down_val < 0)
+                    {
+                        // Downchirp had no energy (get_symbol_val returned -1): sync failed, go back to DETECT
+                        m_state = DETECT;
+                        symbol_cnt = 1;
+                        k_hat = 0;
+                        m_sto_frac = 0;
+                        items_to_consume = m_samples_per_symbol;
+                        items_to_output = 0;
+                        break;
+                    }
                     if ((uint32_t)down_val < m_number_of_bins / 2)
                     {
                         m_cfo_int = floor(down_val / 2);
@@ -620,7 +638,6 @@ namespace gr
                     {
                         m_cfo_int = floor(double(down_val - (int)m_number_of_bins) / 2);
                     }
-
                     // correct STOint and CFOint in the preamble upchirps
                     std::rotate(preamble_upchirps.begin(), preamble_upchirps.begin() + mod(m_cfo_int, m_number_of_bins), preamble_upchirps.end());
 
@@ -632,7 +649,6 @@ namespace gr
                     }
 
                     volk_32fc_x2_multiply_32fc(&preamble_upchirps[0], &preamble_upchirps[0], &CFO_int_correc[0], up_symb_to_use * m_number_of_bins);
-
                     // correct SFO in the preamble upchirps
 
                     sfo_hat = float((m_cfo_int + m_cfo_frac) * m_bw) / m_center_freq;
@@ -648,8 +664,7 @@ namespace gr
                     }
 
                     volk_32fc_x2_multiply_32fc(&preamble_upchirps[0], &preamble_upchirps[0], &sfo_corr_vect[0], up_symb_to_use * m_number_of_bins);
-
-                    float tmp_sto_frac = estimate_STO_frac(); // better estimation of sto_frac in the beginning of the upchirps
+                    float tmp_sto_frac = estimate_STO_frac();
                     float diff_sto_frac = m_sto_frac - tmp_sto_frac;
 
                     if (abs(diff_sto_frac) <= float(m_os_factor - 1) / m_os_factor) // avoid introducing off-by-one errors by estimating fine_sto=-0.499 , rough_sto=0.499
@@ -694,6 +709,17 @@ namespace gr
                     net_ids_samp_dec.resize(2 * m_number_of_bins, 0);
                     // start_off gives the offset in the net_id_samp vector required to be aligned in time (CFOint is equivalent to STOint since upchirp_val was forced to 0)
                     int start_off = (int)m_os_factor / 2 - (my_roundf(m_sto_frac * m_os_factor)) + m_os_factor * (.25 * m_number_of_bins + m_cfo_int);
+                    if (start_off < 0 || start_off + (2 * m_number_of_bins - 1) * (int)m_os_factor >= (int)net_id_samp.size())
+                    {
+                        // Out-of-range net_id offset: sync estimate is invalid, restart detection
+                        m_state = DETECT;
+                        symbol_cnt = 1;
+                        k_hat = 0;
+                        m_sto_frac = 0;
+                        items_to_consume = m_samples_per_symbol;
+                        items_to_output = 0;
+                        break;
+                    }
                     for (uint32_t i = 0; i < m_number_of_bins * 2; i++)
                     {
                         net_ids_samp_dec[i] = net_id_samp[start_off + i * m_os_factor];
